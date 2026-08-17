@@ -13,6 +13,9 @@ concurrency:
   group: sync-upstream-plugin
   cancel-in-progress: false
 
+env:
+  UPSTREAM_REPOSITORY: https://github.com/ZHQWFX/dsh-up.git
+
 jobs:
   sync:
     runs-on: ubuntu-latest
@@ -25,7 +28,7 @@ jobs:
 
       - name: Configure upstream repository
         run: |
-          git remote add upstream https://github.com/01Virex/dsh-status-rotator.git
+          git remote add upstream "$UPSTREAM_REPOSITORY"
           git fetch upstream --tags --force
 
       - name: Find the newest upstream release tag
@@ -69,7 +72,20 @@ jobs:
           set -euo pipefail
           branch="chore/sync-upstream-${UPSTREAM_TAG}"
           git checkout -B "$branch"
-          git merge --no-edit "upstream/main"
+
+      - name: Mirror upstream source files
+        if: steps.changed.outputs.value == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dir=$(mktemp -d)
+          git archive upstream/main | tar -x -C "$source_dir"
+          rsync -a --delete \
+            --exclude='.git/' \
+            --exclude='upstream.json' \
+            --exclude='.github/workflows/sync-upstream.yml' \
+            "$source_dir/" ./
+          rm -rf "$source_dir"
 
       - name: Record synchronized upstream revision
         if: steps.changed.outputs.value == 'true'
@@ -108,7 +124,7 @@ jobs:
           commit-message: "chore: sync upstream ${{ steps.upstream.outputs.tag }}"
           body: |
             This PR synchronizes the plugin with:
-            https://github.com/01Virex/dsh-status-rotator
+            https://github.com/ZHQWFX/dsh-up
             Upstream tag: `${{ steps.upstream.outputs.tag }}`
             Upstream source commit: `${{ steps.upstream.outputs.source_commit }}`
             The PR is intentionally created for review instead of updating `main` directly.
