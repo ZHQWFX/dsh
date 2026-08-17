@@ -2,7 +2,7 @@ name: Sync upstream plugin
 
 on:
   schedule:
-    - cron: "17 3 * * 1"
+    - cron: "17 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -31,55 +31,70 @@ jobs:
           git remote add upstream "$UPSTREAM_REPOSITORY"
           git fetch upstream --tags --force
 
-      - name: Find the newest upstream release tag
+      - name: Read upstream version and tag
         id: upstream
         shell: bash
         run: |
           set -euo pipefail
-          tag=$(git tag -l 'v*' --sort=-version:refname | head -n 1)
-          if [[ -z "$tag" ]]; then
-            echo "No upstream v* tag found" >&2
-            exit 1
-          fi
-          version="${tag#v}"
-          source_commit=$(git rev-parse "$tag^{commit}")
+          tag=$(git tag -l 'v*' --sort=-version:refname | head -n 1 || true)
+          version=$(git show upstream/main:package.json | node -e "let s=''; process.stdin.on('data', d => s += d).on('end', () => console.log(JSON.parse(s).version))")
+          source_commit=$(git rev-parse upstream/main)
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "source_commit=$source_commit" >> "$GITHUB_OUTPUT"
 
-      - name: Stop when the upstream release is already synchronized
+      - name: Detect version or tag update
         id: changed
         shell: bash
         env:
           UPSTREAM_TAG: ${{ steps.upstream.outputs.tag }}
+          UPSTREAM_VERSION: ${{ steps.upstream.outputs.version }}
+          UPSTREAM_COMMIT: ${{ steps.upstream.outputs.source_commit }}
         run: |
           set -euo pipefail
           current_tag=$(node -e "console.log(require('./upstream.json').tag)")
-          if [[ "$current_tag" == "$UPSTREAM_TAG" ]]; then
+          current_version=$(node -e "console.log(require('./upstream.json').version)")
+
+          if [[ "$current_tag" == "$UPSTREAM_TAG" && "$current_version" == "$UPSTREAM_VERSION" ]]; then
             echo "value=false" >> "$GITHUB_OUTPUT"
-            echo "Already synchronized at $UPSTREAM_TAG"
-          else
-            echo "value=true" >> "$GITHUB_OUTPUT"
-            echo "Update available: $current_tag -> $UPSTREAM_TAG"
+            echo "Already synchronized at version $UPSTREAM_VERSION and tag $UPSTREAM_TAG"
+            exit 0
           fi
+
+          if [[ -n "$UPSTREAM_TAG" && "$current_tag" != "$UPSTREAM_TAG" ]]; then
+            source_ref="$UPSTREAM_TAG"
+            update_id="$UPSTREAM_TAG"
+            reason="tag"
+          else
+            source_ref="upstream/main"
+            update_id="version-$UPSTREAM_VERSION"
+            reason="version"
+          fi
+
+          echo "value=true" >> "$GITHUB_OUTPUT"
+          echo "source_ref=$source_ref" >> "$GITHUB_OUTPUT"
+          echo "update_id=$update_id" >> "$GITHUB_OUTPUT"
+          echo "reason=$reason" >> "$GITHUB_OUTPUT"
+          echo "Update detected by $reason: $current_version/$current_tag -> $UPSTREAM_VERSION/$UPSTREAM_TAG"
 
       - name: Create synchronization branch
         if: steps.changed.outputs.value == 'true'
         shell: bash
         env:
-          UPSTREAM_TAG: ${{ steps.upstream.outputs.tag }}
+          UPDATE_ID: ${{ steps.changed.outputs.update_id }}
         run: |
           set -euo pipefail
-          branch="chore/sync-upstream-${UPSTREAM_TAG}"
-          git checkout -B "$branch"
+          git checkout -B "chore/sync-upstream-${UPDATE_ID}"
 
       - name: Mirror upstream source files
         if: steps.changed.outputs.value == 'true'
         shell: bash
+        env:
+          SOURCE_REF: ${{ steps.changed.outputs.source_ref }}
         run: |
           set -euo pipefail
           source_dir=$(mktemp -d)
-          git archive "$UPSTREAM_TAG" | tar -x -C "$source_dir"
+          git archive "$SOURCE_REF" | tar -x -C "$source_dir"
           rsync -a --delete \
             --exclude='.git/' \
             --exclude='upstream.json' \
@@ -118,13 +133,15 @@ jobs:
         uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          branch: chore/sync-upstream-${{ steps.upstream.outputs.tag }}
+          branch: chore/sync-upstream-${{ steps.changed.outputs.update_id }}
           delete-branch: true
-          title: "chore: sync upstream ${{ steps.upstream.outputs.tag }}"
-          commit-message: "chore: sync upstream ${{ steps.upstream.outputs.tag }}"
+          title: "chore: sync upstream ${{ steps.changed.outputs.update_id }}"
+          commit-message: "chore: sync upstream ${{ steps.changed.outputs.update_id }}"
           body: |
             This PR synchronizes the plugin with:
             https://github.com/ZHQWFX/dsh-up
+            Update reason: `${{ steps.changed.outputs.reason }}`
+            Upstream version: `${{ steps.upstream.outputs.version }}`
             Upstream tag: `${{ steps.upstream.outputs.tag }}`
             Upstream source commit: `${{ steps.upstream.outputs.source_commit }}`
             The PR is intentionally created for review instead of updating `main` directly.
