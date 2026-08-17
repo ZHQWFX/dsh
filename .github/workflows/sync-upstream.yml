@@ -42,7 +42,7 @@ jobs:
             exit 1
           fi
           version="${tag#v}"
-          source_commit=$(git rev-parse upstream/main)
+          source_commit=$(git rev-parse "$tag^{commit}")
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "source_commit=$source_commit" >> "$GITHUB_OUTPUT"
@@ -79,7 +79,7 @@ jobs:
         run: |
           set -euo pipefail
           source_dir=$(mktemp -d)
-          git archive upstream/main | tar -x -C "$source_dir"
+          git archive "$UPSTREAM_TAG" | tar -x -C "$source_dir"
           rsync -a --delete \
             --exclude='.git/' \
             --exclude='upstream.json' \
