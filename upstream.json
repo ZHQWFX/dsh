@@ -1,0 +1,9 @@
+{
+  "repository": "https://github.com/01Virex/dsh-status-rotator.git",
+  "branch": "main",
+  "tagPattern": "v*",
+  "version": "0.2.0",
+  "tag": "v0.2.0",
+  "commit": "09836ff04330a17fc670c27a4bed6855547c88ad",
+  "syncMode": "merge"
+}

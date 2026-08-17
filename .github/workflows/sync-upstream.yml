@@ -1,0 +1,114 @@
+name: Sync upstream plugin
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-upstream-plugin
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out internal repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure upstream repository
+        run: |
+          git remote add upstream https://github.com/01Virex/dsh-status-rotator.git
+          git fetch upstream --tags --force
+
+      - name: Find the newest upstream release tag
+        id: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag=$(git tag -l 'v*' --sort=-version:refname | head -n 1)
+          if [[ -z "$tag" ]]; then
+            echo "No upstream v* tag found" >&2
+            exit 1
+          fi
+          version="${tag#v}"
+          source_commit=$(git rev-parse upstream/main)
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "source_commit=$source_commit" >> "$GITHUB_OUTPUT"
+
+      - name: Stop when the upstream release is already synchronized
+        id: changed
+        shell: bash
+        env:
+          UPSTREAM_TAG: ${{ steps.upstream.outputs.tag }}
+        run: |
+          set -euo pipefail
+          current_tag=$(node -e "console.log(require('./upstream.json').tag)")
+          if [[ "$current_tag" == "$UPSTREAM_TAG" ]]; then
+            echo "value=false" >> "$GITHUB_OUTPUT"
+            echo "Already synchronized at $UPSTREAM_TAG"
+          else
+            echo "value=true" >> "$GITHUB_OUTPUT"
+            echo "Update available: $current_tag -> $UPSTREAM_TAG"
+          fi
+
+      - name: Create synchronization branch
+        if: steps.changed.outputs.value == 'true'
+        shell: bash
+        env:
+          UPSTREAM_TAG: ${{ steps.upstream.outputs.tag }}
+        run: |
+          set -euo pipefail
+          branch="chore/sync-upstream-${UPSTREAM_TAG}"
+          git checkout -B "$branch"
+          git merge --no-edit "upstream/main"
+
+      - name: Record synchronized upstream revision
+        if: steps.changed.outputs.value == 'true'
+        shell: bash
+        env:
+          UPSTREAM_TAG: ${{ steps.upstream.outputs.tag }}
+          UPSTREAM_COMMIT: ${{ steps.upstream.outputs.source_commit }}
+          UPSTREAM_VERSION: ${{ steps.upstream.outputs.version }}
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const fs = require('node:fs')
+          const file = 'upstream.json'
+          const data = JSON.parse(fs.readFileSync(file, 'utf8'))
+          data.tag = process.env.UPSTREAM_TAG
+          data.commit = process.env.UPSTREAM_COMMIT
+          data.version = process.env.UPSTREAM_VERSION
+          fs.writeFileSync(file, `${JSON.stringify(data, null, 2)}\n`)
+          NODE
+
+      - name: Validate synchronized plugin
+        if: steps.changed.outputs.value == 'true'
+        run: |
+          node --check lib/index.js
+          node --check lib/client.js
+          node scripts/package-release.cjs
+
+      - name: Open synchronization pull request
+        if: steps.changed.outputs.value == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: chore/sync-upstream-${{ steps.upstream.outputs.tag }}
+          delete-branch: true
+          title: "chore: sync upstream ${{ steps.upstream.outputs.tag }}"
+          commit-message: "chore: sync upstream ${{ steps.upstream.outputs.tag }}"
+          body: |
+            This PR synchronizes the plugin with:
+            https://github.com/01Virex/dsh-status-rotator
+            Upstream tag: `${{ steps.upstream.outputs.tag }}`
+            Upstream source commit: `${{ steps.upstream.outputs.source_commit }}`
+            The PR is intentionally created for review instead of updating `main` directly.
